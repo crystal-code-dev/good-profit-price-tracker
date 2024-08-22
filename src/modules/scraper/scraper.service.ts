@@ -1,58 +1,86 @@
 import { Injectable } from '@nestjs/common';
+import { PriceHistorySource, Product } from '@prisma/client';
 import puppeteer from 'puppeteer';
+import { EQSProductPrice } from 'src/enums/EQSProductPrice';
+import { EQSSearchInput } from 'src/enums/EQSSearchInput';
 
 @Injectable()
 export class ScraperService {
-  async scrapeProductsFromGoogle(item: string): Promise<void> {
-    const browser = await puppeteer.launch({
-      headless: false,
-    });
+  async scrapePrices(product: Product, priceHistorySource: PriceHistorySource) {
+    const browser = await puppeteer.launch({ headless: true });
+    const page = await browser.newPage();
+
+    // Setting an User-Agent to simulate a normal browser
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    );
+
+    console.info(`Scraping ${priceHistorySource.url}`);
 
     try {
-      const page = await browser.newPage();
-      await page.goto(`https://google.com/search?q=${item}&tbm=shop`);
+      await page.goto(priceHistorySource.url, { timeout: 60000 });
 
-      const data = await page.evaluate(async () => {
-        const scrapedData = [];
+      const priceScraped = await page.evaluate(
+        async (
+          priceSelector: string,
+          searchInputSelector: string,
+          identifier: string
+        ) => {
+          await new Promise<void>((resolve) => {
+            const interval = setInterval(() => {
+              const input = document.querySelector(searchInputSelector);
 
-        const cleanText = (text: string): string => {
-          // Remove qualquer conteúdo relacionado a CSS e pseudo-elementos
-          return text
-            .replace(/(?:\s*{[^}]*}|;\s*)+/g, ' ') // Remove blocos de CSS e ponto e vírgula
-            .replace(/::[^}]*\s*/g, '') // Remove pseudo-elementos (::after, ::before, etc.)
-            .replace(/\s{2,}/g, ' ') // Remove múltiplos espaços
-            .trim(); // Remove espaços em branco no início e no final
-        };
-
-        const products = Array.from(document.querySelectorAll('.i0X6df'));
-
-        products.forEach((product) => {
-          const name =
-            cleanText(product.querySelector('.tAxDx')?.textContent) || '';
-          const rate =
-            cleanText(product.querySelector('.QIrs8')?.textContent) || '';
-          const price =
-            cleanText(product.querySelector('.a8Pemb')?.textContent) || '';
-          const company =
-            cleanText(product.querySelector('.IuHnof')?.textContent) || '';
-          const deliverCost =
-            cleanText(product.querySelector('.vEjMR')?.textContent) || '';
-
-          scrapedData.push({
-            name,
-            price,
-            rate,
-            company,
-            deliverCost,
+              if (input) {
+                clearInterval(interval);
+                resolve();
+              }
+            }, 100);
           });
-        });
 
-        return scrapedData;
-      });
+          const inputElement = document.querySelector(
+            searchInputSelector
+          ) as HTMLInputElement;
 
-      console.log('Scraped data:', data);
+          inputElement.value = identifier;
+          inputElement.dispatchEvent(new Event('input', { bubbles: true }));
+          inputElement.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'Enter' })
+          );
+
+          await new Promise<void>((resolve) => {
+            const interval = setInterval(() => {
+              const priceElement = document.querySelector(priceSelector);
+              if (priceElement) {
+                clearInterval(interval);
+                resolve();
+              }
+            }, 100);
+          });
+
+          const priceElement = document.querySelector(priceSelector);
+          const price = priceElement?.textContent?.trim() ?? '';
+
+          return { price };
+        },
+        EQSProductPrice[priceHistorySource.identifier],
+        EQSSearchInput[priceHistorySource.identifier],
+        product.identifier
+      );
+
+      if (!priceScraped.price) {
+        console.error('Price not found');
+        return;
+      }
+
+      return {
+        price: parseFloat(
+          priceScraped.price.replace(/[^0-9.,]/g, '').replace(',', '.')
+        ),
+        idProductFk: product.idProductPk,
+        idPriceHistorySourceFk: priceHistorySource.idPriceHistorySourcePk,
+      };
     } catch (error) {
-      console.error('Error scraping products:', error);
+      console.error('Failed to scrape price:', error);
     } finally {
       await browser.close();
     }
